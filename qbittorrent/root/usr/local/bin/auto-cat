@@ -1,0 +1,88 @@
+#!/bin/bash
+
+base_fun() {
+    if [[ $ENABLE_AUTO_CATEGORY == true ]]; then
+        . /usr/local/bin/share
+        categories_json="/data/config/categories.json"
+        CATEGORY_OR_TAG=${CATEGORY_OR_TAG:-category}
+        filter=""
+    else
+        echo "(W) $(date +'%Y-%m-%dT%H:%M:%S') - [$(basename $0)] 你已将 ENABLE_AUTO_CATEGORY 设置为 false，禁止自动分类..."
+        exit 0
+    fi
+    if [[ $CATEGORY_OR_TAG != category && $CATEGORY_OR_TAG != tag ]]; then
+        echo "(W) $(date +'%Y-%m-%dT%H:%M:%S') - [$(basename $0)] CATEGORY_OR_TAG 赋值错误，仅能赋值 'category' 或 'tag'"
+        exit 1
+    fi
+}
+
+gen_tracker() {
+    local torrent_hash="$1"
+    local tracker_url=$($cmd_curl "${api_url_base}/torrents/trackers?hash=${torrent_hash}" | jq -r .[].url | grep -m1 -i "http" | awk -F "://|/" '{print $2}')
+    local tracker=$(echo "$tracker_url" | awk -F "." '{print $((NF - 1))}')
+    [[ $tracker == edu ]] && tracker=$(echo "$tracker_url" | awk -F "." '{print $((NF - 2))}')
+    echo "$tracker"
+}
+
+category() {
+    local torrent_hash="$1"
+    local tracker=$(gen_tracker "$torrent_hash")
+    local current_category=$($cmd_curl "${api_url_base}/torrents/info?hashes=${torrent_hash}" | jq -r .[].category | sed "s# #%20#g")
+    if [[ -z $(cat $categories_json | jq -r 'keys'[] | grep -x "$tracker") ]]; then
+        $cmd_curl_post -d "category=$tracker" "${api_url_base}/torrents/createCategory" &>/dev/null
+    fi
+    if [[ $current_category != $tracker ]]; then
+        $cmd_curl_post -d "hashes=${torrent_hash}&category=${tracker}" "${api_url_base}/torrents/setCategory"
+    fi
+}
+
+tag() {
+    local torrent_hash="$1"
+    local tracker=$(gen_tracker "$torrent_hash")
+    $cmd_curl_post -d "hashes=${torrent_hash}&tags=${tracker}" ${api_url_base}/torrents/addTags
+}
+
+cat_all() {
+    local hashes=( $($cmd_curl "${api_url_base}/torrents/info${filter}" | jq -r .[].hash) )
+    for hash in "${hashes[@]}"; do
+        eval $CATEGORY_OR_TAG "$hash"
+    done
+}
+
+usage() {
+    echo "用法："
+    echo "auto-cat -a        # 当CATEGORY_OR_TAG=category时，将所有未分类的种子按tracker分类；当CATEGORY_OR_TAG=tag时，对所有种子按tracker打标签"
+    echo "auto-cat -A        # 当CATEGORY_OR_TAG=category时，将所有种子按tracker分类；当CATEGORY_OR_TAG=tag时，对所有种子按tracker打标签"
+    echo "auto-cat -h        # 使用帮助"
+    echo "auto-cat -i <hash> # 指定某个种子的hash，当CATEGORY_OR_TAG=category时，将其按tracker分类；当CATEGORY_OR_TAG=tag时，将其按tracker打标签"
+}
+
+main() {
+    while getopts :aAhi: OPT; do
+        case $OPT in
+            a)
+                base_fun
+                [[ $CATEGORY_OR_TAG == category ]] && filter="?category="
+                cat_all
+                ;;
+            A)
+                base_fun
+                cat_all
+                ;;
+            h)
+                usage
+                ;;
+            i)
+                base_fun
+                eval $CATEGORY_OR_TAG "$OPTARG"
+                ;;
+            ?)
+                usage
+                exit 2
+                ;;
+        esac
+    done
+    shift $((OPTIND - 1))
+}
+
+main "$@"
